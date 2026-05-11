@@ -49,6 +49,8 @@ type ClientRecord = {
 };
 
 const STORAGE_KEY = "buyerBehaviourReview.next.v1";
+const DEFAULT_CLIENT_ID = "00000000-0000-4000-8000-000000000001";
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const stages: Stage[] = [
   {
@@ -395,14 +397,31 @@ function createSupabase() {
   return createClient(url, key);
 }
 
+function defaultClient(): ClientRecord {
+  return { id: DEFAULT_CLIENT_ID, name: "Default Client", data: defaultState() };
+}
+
+function normalizeClients(clients: ClientRecord[]) {
+  if (!clients.length) return [defaultClient()];
+  return clients.map((client, index) => ({
+    ...client,
+    id: UUID_PATTERN.test(client.id)
+      ? client.id
+      : index === 0
+        ? DEFAULT_CLIENT_ID
+        : crypto.randomUUID(),
+    data: { ...defaultState(), ...client.data },
+  }));
+}
+
 function readLocalClients(): ClientRecord[] {
-  if (typeof window === "undefined") return [{ id: "default", name: "Default Client", data: defaultState() }];
+  if (typeof window === "undefined") return [defaultClient()];
   const saved = window.localStorage.getItem(STORAGE_KEY);
-  if (!saved) return [{ id: "default", name: "Default Client", data: defaultState() }];
+  if (!saved) return [defaultClient()];
   try {
-    return JSON.parse(saved) as ClientRecord[];
+    return normalizeClients(JSON.parse(saved) as ClientRecord[]);
   } catch {
-    return [{ id: "default", name: "Default Client", data: defaultState() }];
+    return [defaultClient()];
   }
 }
 
@@ -421,8 +440,8 @@ function score(values: string[]) {
 }
 
 export default function DashboardPage() {
-  const [clients, setClients] = useState<ClientRecord[]>([{ id: "default", name: "Default Client", data: defaultState() }]);
-  const [activeClientId, setActiveClientId] = useState("default");
+  const [clients, setClients] = useState<ClientRecord[]>([defaultClient()]);
+  const [activeClientId, setActiveClientId] = useState(DEFAULT_CLIENT_ID);
   const [saving, setSaving] = useState("Local draft");
 
   const activeClient = clients.find((client) => client.id === activeClientId) ?? clients[0];
@@ -435,18 +454,23 @@ export default function DashboardPage() {
     async function load() {
       const supabase = createSupabase();
       if (!supabase) {
-        setClients(readLocalClients());
+        const localClients = readLocalClients();
+        setClients(localClients);
+        setActiveClientId(localClients[0].id);
         return;
       }
 
       const { data: rows, error } = await supabase.from("dashboard_clients").select("id,name,data").order("created_at");
       if (error || !rows?.length) {
-        setClients(readLocalClients());
+        const localClients = readLocalClients();
+        setClients(localClients);
+        setActiveClientId(localClients[0].id);
         setSaving("Local draft");
         return;
       }
-      setClients(rows as ClientRecord[]);
-      setActiveClientId(rows[0].id);
+      const remoteClients = normalizeClients(rows as ClientRecord[]);
+      setClients(remoteClients);
+      setActiveClientId(remoteClients[0].id);
       setSaving("Synced");
     }
     load();
@@ -458,8 +482,9 @@ export default function DashboardPage() {
   }, [clients]);
 
   async function persist(nextClients: ClientRecord[]) {
-    setClients(nextClients);
-    writeLocalClients(nextClients);
+    const normalizedClients = normalizeClients(nextClients);
+    setClients(normalizedClients);
+    writeLocalClients(normalizedClients);
 
     const supabase = createSupabase();
     if (!supabase) {
@@ -468,7 +493,7 @@ export default function DashboardPage() {
     }
 
     setSaving("Saving...");
-    const payload = nextClients.map((client) => ({
+    const payload = normalizedClients.map((client) => ({
       id: client.id,
       name: client.name,
       data: client.data,
